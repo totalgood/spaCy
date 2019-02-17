@@ -7,7 +7,8 @@ import numpy
 import numpy.linalg
 from libc.math cimport sqrt
 
-from .doc cimport token_by_start, token_by_end
+from .doc cimport token_by_start, token_by_end, get_token_attr, _get_lca_matrix
+from .token cimport TokenC
 from ..structs cimport TokenC, LexemeC
 from ..typedefs cimport flags_t, attr_t, hash_t
 from ..attrs cimport attr_id_t
@@ -16,30 +17,46 @@ from ..util import normalize_slice
 from ..attrs cimport IS_PUNCT, IS_SPACE
 from ..lexeme cimport Lexeme
 from ..compat import is_config
-from .. import about
+from ..errors import Errors, TempErrors
+from .underscore import Underscore, get_ext_args
 
 
 cdef class Span:
-    """
-    A slice from a Doc object.
-    """
-    def __cinit__(self, Doc doc, int start, int end, int label=0, vector=None,
-                  vector_norm=None):
-        """
-        Create a Span object from the slice doc[start : end]
+    """A slice from a Doc object."""
+    @classmethod
+    def set_extension(cls, name, **kwargs):
+        if cls.has_extension(name) and not kwargs.get('force', False):
+            raise ValueError(Errors.E090.format(name=name, obj='Span'))
+        Underscore.span_extensions[name] = get_ext_args(**kwargs)
 
-        Arguments:
-            doc (Doc): The parent document.
-            start (int): The index of the first token of the span.
-            end (int): The index of the first token after the span.
-            label (int): A label to attach to the Span, e.g. for named entities.
-            vector (ndarray[ndim=1, dtype='float32']): A meaning representation of the span.
-        Returns:
-            Span The newly constructed object.
+    @classmethod
+    def get_extension(cls, name):
+        return Underscore.span_extensions.get(name)
+
+    @classmethod
+    def has_extension(cls, name):
+        return name in Underscore.span_extensions
+
+    @classmethod
+    def remove_extension(cls, name):
+        if not cls.has_extension(name):
+            raise ValueError(Errors.E046.format(name=name))
+        return Underscore.span_extensions.pop(name)
+
+    def __cinit__(self, Doc doc, int start, int end, attr_t label=0,
+                  vector=None, vector_norm=None):
+        """Create a `Span` object from the slice `doc[start : end]`.
+
+        doc (Doc): The parent document.
+        start (int): The index of the first token of the span.
+        end (int): The index of the first token after the span.
+        label (uint64): A label to attach to the Span, e.g. for named entities.
+        vector (ndarray[ndim=1, dtype='float32']): A meaning representation
+            of the span.
+        RETURNS (Span): The newly constructed object.
         """
         if not (0 <= start <= end <= len(doc)):
-            raise IndexError
-
+            raise IndexError(Errors.E035.format(start=start, end=end, length=len(doc)))
         self.doc = doc
         self.start = start
         self.start_char = self.doc[start].idx if start < self.doc.length else 0
@@ -48,11 +65,18 @@ cdef class Span:
             self.end_char = self.doc[end - 1].idx + len(self.doc[end - 1])
         else:
             self.end_char = 0
+        if label not in doc.vocab.strings:
+            raise ValueError(Errors.E084.format(label=label))
         self.label = label
         self._vector = vector
         self._vector_norm = vector_norm
 
     def __richcmp__(self, Span other, int op):
+        if other is None:
+            if op == 0 or op == 1 or op == 2:
+                return False
+            else:
+                return True
         # Eq
         if op == 0:
             return self.start_char < other.start_char
@@ -70,8 +94,11 @@ cdef class Span:
     def __hash__(self):
         return hash((self.doc, self.label, self.start_char, self.end_char))
 
-
     def __len__(self):
+        """Get the number of tokens in the span.
+
+        RETURNS (int): The number of tokens in the span.
+        """
         self._recalculate_indices()
         if self.end < self.start:
             return 0
@@ -83,6 +110,16 @@ cdef class Span:
         return self.text.encode('utf-8')
 
     def __getitem__(self, object i):
+        """Get a `Token` or a `Span` object
+
+        i (int or tuple): The index of the token within the span, or slice of
+            the span to get.
+        RETURNS (Token or Span): The token at `span[i]`.
+
+        EXAMPLE:
+            >>> span[0]
+            >>> span[1:3]
+        """
         self._recalculate_indices()
         if isinstance(i, slice):
             start, end = normalize_slice(len(self), i.start, i.stop, i.step)
@@ -94,41 +131,113 @@ cdef class Span:
                 return self.doc[self.start + i]
 
     def __iter__(self):
+        """Iterate over `Token` objects.
+
+        YIELDS (Token): A `Token` object.
+        """
         self._recalculate_indices()
         for i in range(self.start, self.end):
             yield self.doc[i]
 
-    def merge(self, *args, **attributes):
-        """
-        Retokenize the document, such that the span is merged into a single token.
+    @property
+    def _(self):
+        """User space for adding custom attribute extensions."""
+        return Underscore(Underscore.span_extensions, self,
+                          start=self.start_char, end=self.end_char)
 
-        Arguments:
-            **attributes:
-                Attributes to assign to the merged token. By default, attributes
-                are inherited from the syntactic root token of the span.
-        Returns:
-            token (Token):
-                The newly merged token.
+    def as_doc(self):
+        # TODO: fix
+        """Create a `Doc` object view of the Span's data. This is mostly
+        useful for C-typed interfaces.
+
+        RETURNS (Doc): The `Doc` view of the span.
         """
-        return self.doc.merge(self.start_char, self.end_char, *args, **attributes)
+        cdef Doc doc = Doc(self.doc.vocab)
+        doc.length = self.end-self.start
+        doc.c = &self.doc.c[self.start]
+        doc.mem = self.doc.mem
+        doc.is_parsed = self.doc.is_parsed
+        doc.is_tagged = self.doc.is_tagged
+        doc.noun_chunks_iterator = self.doc.noun_chunks_iterator
+        doc.user_hooks = self.doc.user_hooks
+        doc.user_span_hooks = self.doc.user_span_hooks
+        doc.user_token_hooks = self.doc.user_token_hooks
+        doc.vector = self.vector
+        doc.vector_norm = self.vector_norm
+        for key, value in self.doc.cats.items():
+            if hasattr(key, '__len__') and len(key) == 3:
+                cat_start, cat_end, cat_label = key
+                if cat_start == self.start_char and cat_end == self.end_char:
+                    doc.cats[cat_label] = value
+        return doc
+
+    def merge(self, *args, **attributes):
+        """Retokenize the document, such that the span is merged into a single
+        token.
+
+        **attributes: Attributes to assign to the merged token. By default,
+            attributes are inherited from the syntactic root token of the span.
+        RETURNS (Token): The newly merged token.
+        """
+        return self.doc.merge(self.start_char, self.end_char, *args,
+                              **attributes)
+
+    def get_lca_matrix(self):
+        """Calculates a matrix of Lowest Common Ancestors (LCA) for a given
+        `Span`, where LCA[i, j] is the index of the lowest common ancestor among
+        the tokens span[i] and span[j]. If they have no common ancestor within
+        the span, LCA[i, j] will be -1.
+
+        RETURNS (np.array[ndim=2, dtype=numpy.int32]): LCA matrix with shape
+            (n, n), where n = len(self).
+        """
+        return numpy.asarray(_get_lca_matrix(self.doc, self.start, self.end))
 
     def similarity(self, other):
-        """
-        Make a semantic similarity estimate. The default estimate is cosine
+        """Make a semantic similarity estimate. The default estimate is cosine
         similarity using an average of word vectors.
 
-        Arguments:
-            other (object): The object to compare with. By default, accepts Doc,
-                Span, Token and Lexeme objects.
-
-        Return:
-            score (float): A scalar similarity score. Higher is more similar.
+        other (object): The object to compare with. By default, accepts `Doc`,
+            `Span`, `Token` and `Lexeme` objects.
+        RETURNS (float): A scalar similarity score. Higher is more similar.
         """
         if 'similarity' in self.doc.user_span_hooks:
             self.doc.user_span_hooks['similarity'](self, other)
+        if len(self) == 1 and hasattr(other, 'orth'):
+            if self[0].orth == other.orth:
+                return 1.0
+        elif hasattr(other, '__len__') and len(self) == len(other):
+            for i in range(len(self)):
+                if self[i].orth != getattr(other[i], 'orth', None):
+                    break
+            else:
+                return 1.0
         if self.vector_norm == 0.0 or other.vector_norm == 0.0:
             return 0.0
         return numpy.dot(self.vector, other.vector) / (self.vector_norm * other.vector_norm)
+
+    cpdef np.ndarray to_array(self, object py_attr_ids):
+        """Given a list of M attribute IDs, export the tokens to a numpy
+        `ndarray` of shape `(N, M)`, where `N` is the length of the document.
+        The values will be 32-bit integers.
+
+        attr_ids (list[int]): A list of attribute ID ints.
+        RETURNS (numpy.ndarray[long, ndim=2]): A feature matrix, with one row
+            per word, and one column per attribute indicated in the input
+            `attr_ids`.
+        """
+        cdef int i, j
+        cdef attr_id_t feature
+        cdef np.ndarray[attr_t, ndim=2] output
+        # Make an array from the attributes --- otherwise our inner loop is Python
+        # dict iteration.
+        cdef np.ndarray[attr_t, ndim=1] attr_ids = numpy.asarray(py_attr_ids, dtype=numpy.uint64)
+        cdef int length = self.end - self.start
+        output = numpy.ndarray(shape=(length, len(attr_ids)), dtype=numpy.uint64)
+        for i in range(self.start, self.end):
+            for j, feature in enumerate(attr_ids):
+                output[i-self.start, j] = get_token_attr(&self.doc.c[i], feature)
+        return output
 
     cpdef int _recalculate_indices(self) except -1:
         if self.end > self.doc.length \
@@ -136,21 +245,20 @@ cdef class Span:
         or (self.doc.c[self.end-1].idx + self.doc.c[self.end-1].lex.length) != self.end_char:
             start = token_by_start(self.doc.c, self.doc.length, self.start_char)
             if self.start == -1:
-                raise IndexError("Error calculating span: Can't find start")
+                raise IndexError(Errors.E036.format(start=self.start_char))
             end = token_by_end(self.doc.c, self.doc.length, self.end_char)
             if end == -1:
-                raise IndexError("Error calculating span: Can't find end")
-
+                raise IndexError(Errors.E037.format(end=self.end_char))
             self.start = start
             self.end = end + 1
 
-    property sent:
-        """
-        The sentence span that this span is a part of.
+    property vocab:
+        """RETURNS (Vocab): The Span's Doc's vocab."""
+        def __get__(self):
+            return self.doc.vocab
 
-        Returns:
-            Span The sentence this is part of.
-        """
+    property sent:
+        """RETURNS (Span): The sentence span that the span is a part of."""
         def __get__(self):
             if 'sent' in self.doc.user_span_hooks:
                 return self.doc.user_span_hooks['sent'](self)
@@ -162,16 +270,38 @@ cdef class Span:
                 root += root.head
                 n += 1
                 if n >= self.doc.length:
-                    raise RuntimeError
-            return self.doc[root.l_edge : root.r_edge + 1]
+                    raise RuntimeError(Errors.E038)
+            return self.doc[root.l_edge:root.r_edge + 1]
+
+    property ents:
+        """RETURNS (list): A list of tokens that belong to the current span."""
+        def __get__(self):
+            ents = []
+            for ent in self.doc.ents:
+                if ent.start >= self.start and ent.end <= self.end:
+                    ents.append(ent)
+            return ents
 
     property has_vector:
+        """RETURNS (bool): Whether a word vector is associated with the object.
+        """
         def __get__(self):
             if 'has_vector' in self.doc.user_span_hooks:
                 return self.doc.user_span_hooks['has_vector'](self)
-            return any(token.has_vector for token in self)
+            elif self.vocab.vectors.data.size > 0:
+                return any(token.has_vector for token in self)
+            elif self.doc.tensor.size > 0:
+                return True
+            else:
+                return False
 
     property vector:
+        """A real-valued meaning representation. Defaults to an average of the
+        token vectors.
+
+        RETURNS (numpy.ndarray[ndim=1, dtype='float32']): A 1D numpy array
+            representing the span's semantics.
+        """
         def __get__(self):
             if 'vector' in self.doc.user_span_hooks:
                 return self.doc.user_span_hooks['vector'](self)
@@ -180,6 +310,7 @@ cdef class Span:
             return self._vector
 
     property vector_norm:
+        """RETURNS (float): The L2 norm of the vector representation."""
         def __get__(self):
             if 'vector_norm' in self.doc.user_span_hooks:
                 return self.doc.user_span_hooks['vector'](self)
@@ -193,6 +324,9 @@ cdef class Span:
             return self._vector_norm
 
     property sentiment:
+        """RETURNS (float): A scalar value indicating the positivity or
+            negativity of the span.
+        """
         def __get__(self):
             if 'sentiment' in self.doc.user_span_hooks:
                 return self.doc.user_span_hooks['sentiment'](self)
@@ -200,6 +334,7 @@ cdef class Span:
                 return sum([token.sentiment for token in self]) / len(self)
 
     property text:
+        """RETURNS (unicode): The original verbatim text of the span."""
         def __get__(self):
             text = self.text_with_ws
             if self[-1].whitespace_:
@@ -207,77 +342,81 @@ cdef class Span:
             return text
 
     property text_with_ws:
+        """The text content of the span with a trailing whitespace character if
+        the last token has one.
+
+        RETURNS (unicode): The text content of the span (with trailing
+            whitespace).
+        """
         def __get__(self):
             return u''.join([t.text_with_ws for t in self])
 
     property noun_chunks:
-        """
-        Yields base noun-phrase #[code Span] objects, if the document
-        has been syntactically parsed. A base noun phrase, or
-        'NP chunk', is a noun phrase that does not permit other NPs to
-        be nested within it – so no NP-level coordination, no prepositional
-        phrases, and no relative clauses. For example:
+        """Yields base noun-phrase `Span` objects, if the document has been
+        syntactically parsed. A base noun phrase, or "NP chunk", is a noun
+        phrase that does not permit other NPs to be nested within it – so no
+        NP-level coordination, no prepositional phrases, and no relative
+        clauses.
+
+        YIELDS (Span): Base noun-phrase `Span` objects
         """
         def __get__(self):
             if not self.doc.is_parsed:
-                raise ValueError(
-                    "noun_chunks requires the dependency parse, which "
-                    "requires data to be installed. For more info, see the "
-                    "documentation: \n%s\n" % about.__docs_models__)
-            # Accumulate the result before beginning to iterate over it. This prevents
-            # the tokenisation from being changed out from under us during the iteration.
-            # The tricky thing here is that Span accepts its tokenisation changing,
-            # so it's okay once we have the Span objects. See Issue #375
+                raise ValueError(Errors.E029)
+            # Accumulate the result before beginning to iterate over it. This
+            # prevents the tokenisation from being changed out from under us
+            # during the iteration. The tricky thing here is that Span accepts
+            # its tokenisation changing, so it's okay once we have the Span
+            # objects. See Issue #375
             spans = []
+            cdef attr_t label
             for start, end, label in self.doc.noun_chunks_iterator(self):
-                spans.append(Span(self, start, end, label=label))
+                spans.append(Span(self.doc, start, end, label=label))
             for span in spans:
                 yield span
 
     property root:
-        """
-        The token within the span that's highest in the parse tree. If there's a
-        tie, the earlist is prefered.
+        """The token within the span that's highest in the parse tree.
+        If there's a tie, the earliest is prefered.
 
-        Returns:
-            Token: The root token.
+        RETURNS (Token): The root token.
 
-        i.e. has the shortest path to the root of the sentence (or is the root
-        itself). If multiple words are equally high in the tree, the first word
-        is taken. For example:
+        EXAMPLE: The root token has the shortest path to the root of the
+            sentence (or is the root itself). If multiple words are equally
+            high in the tree, the first word is taken. For example:
 
-        >>> toks = nlp(u'I like New York in Autumn.')
+            >>> toks = nlp(u'I like New York in Autumn.')
 
-        Let's name the indices --- easier than writing "toks[4]" etc.
+            Let's name the indices – easier than writing `toks[4]` etc.
 
-        >>> i, like, new, york, in_, autumn, dot = range(len(toks))
+            >>> i, like, new, york, in_, autumn, dot = range(len(toks))
 
-        The head of 'new' is 'York', and the head of 'York' is 'like'
+            The head of 'new' is 'York', and the head of "York" is "like"
 
-        >>> toks[new].head.orth_
-        'York'
-        >>> toks[york].head.orth_
-        'like'
+            >>> toks[new].head.text
+            'York'
+            >>> toks[york].head.text
+            'like'
 
-        Create a span for "New York". Its root is "York".
+            Create a span for "New York". Its root is "York".
 
-        >>> new_york = toks[new:york+1]
-        >>> new_york.root.orth_
-        'York'
+            >>> new_york = toks[new:york+1]
+            >>> new_york.root.text
+            'York'
 
-        Here's a more complicated case, raise by Issue #214
+            Here's a more complicated case, raised by issue #214:
 
-        >>> toks = nlp(u'to, north and south carolina')
-        >>> to, north, and_, south, carolina = toks
-        >>> south.head.text, carolina.head.text
-        ('north', 'to')
+            >>> toks = nlp(u'to, north and south carolina')
+            >>> to, north, and_, south, carolina = toks
+            >>> south.head.text, carolina.head.text
+            ('north', 'to')
 
-        Here 'south' is a child of 'north', which is a child of 'carolina'.
-        Carolina is the root of the span:
+            Here "south" is a child of "north", which is a child of "carolina".
+            Carolina is the root of the span:
 
-        >>> south_carolina = toks[-2:]
-        >>> south_carolina.root.text
-        'carolina'
+            >>> south_carolina = toks[-2:]
+            >>> south_carolina.root.text
+            'carolina'
         """
         def __get__(self):
             self._recalculate_indices()
@@ -294,11 +433,11 @@ cdef class Span:
                 if self.doc.c[i].head == 0:
                     return self.doc[i]
             # If we don't have a sentence root, we do something that's not so
-            # algorithmically clever, but I think should be quite fast, especially
-            # for short spans.
+            # algorithmically clever, but I think should be quite fast,
+            # especially for short spans.
             # For each word, we count the path length, and arg min this measure.
-            # We could use better tree logic to save steps here...But I think this
-            # should be okay.
+            # We could use better tree logic to save steps here...But I
+            # think this should be okay.
             cdef int current_best = self.doc.length
             cdef int root = -1
             for i in range(self.start, self.end):
@@ -314,22 +453,22 @@ cdef class Span:
                 return self.doc[root]
 
     property lefts:
-        """
-        Tokens that are to the left of the span, whose head is within the Span.
+        """ Tokens that are to the left of the span, whose head is within the
+        `Span`.
 
-        Yields: Token A left-child of a token of the span.
+        YIELDS (Token):A left-child of a token of the span.
         """
         def __get__(self):
-            for token in reversed(self): # Reverse, so we get the tokens in order
+            for token in reversed(self):  # Reverse, so we get tokens in order
                 for left in token.lefts:
                     if left.i < self.start:
                         yield left
 
     property rights:
-        """
-        Tokens that are to the right of the Span, whose head is within the Span.
+        """Tokens that are to the right of the Span, whose head is within the
+        `Span`.
 
-        Yields: Token A right-child of a token of the span.
+        YIELDS (Token): A right-child of a token of the span.
         """
         def __get__(self):
             for token in self:
@@ -337,11 +476,24 @@ cdef class Span:
                     if right.i >= self.end:
                         yield right
 
-    property subtree:
+    property n_lefts:
+        """RETURNS (int): The number of leftward immediate children of the
+            span, in the syntactic dependency parse.
         """
-        Tokens that descend from tokens in the span, but fall outside it.
+        def __get__(self):
+            return len(list(self.lefts))
 
-        Yields: Token A descendant of a token within the span.
+    property n_rights:
+        """RETURNS (int): The number of rightward immediate children of the
+            span, in the syntactic dependency parse.
+        """
+        def __get__(self):
+            return len(list(self.rights))
+
+    property subtree:
+        """Tokens within the span and tokens which descend from them.
+
+        YIELDS (Token): A token within the span, or a descendant from it.
         """
         def __get__(self):
             for word in self.lefts:
@@ -351,51 +503,51 @@ cdef class Span:
                 yield from word.subtree
 
     property ent_id:
-        """
-        An (integer) entity ID. Usually assigned by patterns in the Matcher.
-        """
+        """RETURNS (uint64): The entity ID."""
         def __get__(self):
             return self.root.ent_id
 
         def __set__(self, hash_t key):
-            # TODO
-            raise NotImplementedError(
-                "Can't yet set ent_id from Span. Vote for this feature on the issue "
-                "tracker: http://github.com/explosion/spaCy/issues")
+            raise NotImplementedError(TempErrors.T007.format(attr='ent_id'))
+
     property ent_id_:
-        """
-        A (string) entity ID. Usually assigned by patterns in the Matcher.
-        """
+        """RETURNS (unicode): The (string) entity ID."""
         def __get__(self):
             return self.root.ent_id_
 
         def __set__(self, hash_t key):
-            # TODO
-            raise NotImplementedError(
-                "Can't yet set ent_id_ from Span. Vote for this feature on the issue "
-                "tracker: http://github.com/explosion/spaCy/issues")
+            raise NotImplementedError(TempErrors.T007.format(attr='ent_id_'))
 
     property orth_:
+        """Verbatim text content (identical to Span.text). Exists mostly for
+        consistency with other attributes.
+
+        RETURNS (unicode): The span's text."""
         def __get__(self):
-            return ''.join([t.string for t in self]).strip()
+            return self.text
 
     property lemma_:
+        """RETURNS (unicode): The span's lemma."""
         def __get__(self):
             return ' '.join([t.lemma_ for t in self]).strip()
 
     property upper_:
+        """Deprecated. Use Span.text.upper() instead."""
         def __get__(self):
-            return ''.join([t.string.upper() for t in self]).strip()
+            return ''.join([t.text_with_ws.upper() for t in self]).strip()
 
     property lower_:
+        """Deprecated. Use Span.text.lower() instead."""
         def __get__(self):
-            return ''.join([t.string.lower() for t in self]).strip()
+            return ''.join([t.text_with_ws.lower() for t in self]).strip()
 
     property string:
+        """Deprecated: Use Span.text_with_ws instead."""
         def __get__(self):
-            return ''.join([t.string for t in self])
+            return ''.join([t.text_with_ws for t in self])
 
     property label_:
+        """RETURNS (unicode): The span's label."""
         def __get__(self):
             return self.doc.vocab.strings[self.label]
 
@@ -412,8 +564,5 @@ cdef int _count_words_to_root(const TokenC* token, int sent_length) except -1:
         token += token.head
         n += 1
         if n >= sent_length:
-            raise RuntimeError(
-                "Array bounds exceeded while searching for root word. This likely "
-                "means the parse tree is in an invalid state. Please report this "
-                "issue here: http://github.com/explosion/spaCy/issues")
+            raise RuntimeError(Errors.E039)
     return n

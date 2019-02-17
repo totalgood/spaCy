@@ -1,14 +1,12 @@
 # spaCy
 spacy/data/
 corpora/
-models/
+/models/
 keys/
 
 # Website
 website/www/
 website/_deploy.sh
-website/package.json
-website/announcement.jade
 website/.gitignore
 
 # Cython / C extensions
@@ -28,8 +26,10 @@ Profile.prof
 .Python
 .python-version
 __pycache__/
+.pytest_cache
 *.py[cod]
 .env/
+.env*
 .~env/
 .venv
 venv/
@@ -39,7 +39,6 @@ venv/
 
 # Distribution / packaging
 env/
-bin/
 build/
 develop-eggs/
 dist/
@@ -99,3 +98,6 @@ Desktop.ini
 
 # Other
 *.tgz
+
+# Pycharm project files
+*.idea

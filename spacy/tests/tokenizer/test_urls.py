@@ -33,13 +33,10 @@ URLS_SHOULD_MATCH = [
     "http://userid:password@example.com/",
     "http://142.42.1.1/",
     "http://142.42.1.1:8080/",
-    "http://⌘.ws",
-    "http://⌘.ws/",
     "http://foo.com/blah_(wikipedia)#cite-1",
     "http://foo.com/blah_(wikipedia)_blah#cite-1",
     "http://foo.com/unicode_(✪)_in_parens",
     "http://foo.com/(something)?after=parens",
-    "http://☺.damowmow.com/",
     "http://code.google.com/events/#&product=browser",
     "http://j.mp",
     "ftp://foo.bar/baz",
@@ -49,14 +46,17 @@ URLS_SHOULD_MATCH = [
     "http://a.b-c.de",
     "http://223.255.255.254",
     "http://a.b--c.de/", # this is a legit domain name see: https://gist.github.com/dperini/729294 comment on 9/9/2014
-    "http://✪df.ws/123",
-    "http://➡.ws/䨹",
-    "http://مثال.إختبار",
-    "http://例子.测试",
-    "http://उदाहरण.परीक्षा",
 
-    pytest.mark.xfail("http://foo.com/blah_blah_(wikipedia)"),
-    pytest.mark.xfail("http://foo.com/blah_blah_(wikipedia)_(again)"),
+    pytest.param("http://foo.com/blah_blah_(wikipedia)", marks=pytest.mark.xfail()),
+    pytest.param("http://foo.com/blah_blah_(wikipedia)_(again)", marks=pytest.mark.xfail()),
+    pytest.param("http://⌘.ws", marks=pytest.mark.xfail()),
+    pytest.param("http://⌘.ws/", marks=pytest.mark.xfail()),
+    pytest.param("http://☺.damowmow.com/", marks=pytest.mark.xfail()),
+    pytest.param("http://✪df.ws/123", marks=pytest.mark.xfail()),
+    pytest.param("http://➡.ws/䨹", marks=pytest.mark.xfail()),
+    pytest.param("http://مثال.إختبار", marks=pytest.mark.xfail()),
+    pytest.param("http://例子.测试", marks=pytest.mark.xfail()),
+    pytest.param("http://उदाहरण.परीक्षा", marks=pytest.mark.xfail()),
 ]
 
 URLS_SHOULD_NOT_MATCH = [
@@ -83,7 +83,6 @@ URLS_SHOULD_NOT_MATCH = [
     "http://foo.bar/foo(bar)baz quux",
     "ftps://foo.bar/",
     "http://-error-.invalid/",
-    "http://-a.b.co",
     "http://a.b-.co",
     "http://0.0.0.0",
     "http://10.1.1.0",
@@ -96,9 +95,10 @@ URLS_SHOULD_NOT_MATCH = [
     "http://10.1.1.1",
     "NASDAQ:GOOG",
 
-    pytest.mark.xfail("foo.com"),
-    pytest.mark.xfail("http://1.1.1.1.1"),
-    pytest.mark.xfail("http://www.foo.bar./"),
+    pytest.param("foo.com", marks=pytest.mark.xfail()),
+    pytest.param("http://1.1.1.1.1", marks=pytest.mark.xfail()),
+    pytest.param("http://www.foo.bar./", marks=pytest.mark.xfail()),
+    pytest.param("http://-a.b.co", marks=pytest.mark.xfail()),
 ]
 
 
