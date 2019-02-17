@@ -200,7 +200,7 @@ def setup_package():
             scripts=['bin/spacy'],
             setup_requires=['wheel>=0.32.0,<0.33.0'],
             install_requires=[
-                'numpy>=1.15.0',
+                'numpy==1.14.5',
                 'murmurhash>=0.28.0,<1.1.0',
                 'cymem>=2.0.2,<2.1.0',
                 'preshed>=2.0.1,<2.1.0',
