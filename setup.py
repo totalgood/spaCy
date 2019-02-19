@@ -198,7 +198,7 @@ def setup_package():
             license=about['__license__'],
             ext_modules=ext_modules,
             scripts=['bin/spacy'],
-            setup_requires=['wheel>=0.32.0,<0.33.0'],
+            setup_requires=['wheel>=0.32.0,<=0.33.0'],
             install_requires=[
                 'numpy==1.14.5',
                 'murmurhash>=0.28.0,<1.1.0',
